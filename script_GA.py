@@ -1,255 +1,435 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple
-import random
-import copy
-from math import sqrt
-from statistics import mean, stdev
+from mpl_toolkits.mplot3d import Axes3D
+import time
 
-class TSPGeneticAlgorithm:
-    def __init__(self, ncities: int, population_size: int = 100, max_generations: int = 500, 
-                 crossover_rate: float = 0.8, mutation_rate: float = 0.2, elitism_rate: float = 0.1):
-
-        self.ncities = ncities
+class GeneticAlgorithm:
+    def __init__(self, objective_func, bounds, population_size=50, chromosome_length=20, 
+                 max_generations=100, crossover_rate=0.7, mutation_rate=0.02, 
+                 elitism_rate=0.6, maximize=False, verbose=True):
+        """
+        Inicializa o Algoritmo Genético com os parâmetros especificados.
+        
+        Args:
+            objective_func (function): Função objetivo a ser otimizada
+            bounds (list): Lista de tuplas com os limites inferior e superior para cada variável
+            population_size (int): Tamanho da população
+            chromosome_length (int): Comprimento do cromossomo em bits para cada variável
+            max_generations (int): Número máximo de gerações
+            crossover_rate (float): Taxa de crossover (0-1)
+            mutation_rate (float): Taxa de mutação (0-1)
+            elitism_rate (float): Taxa de elitismo (0-1)
+            maximize (bool): True para maximização, False para minimização
+            verbose (bool): Se True, imprime informações durante a execução
+        """
+        self.objective_func = objective_func
+        self.bounds = bounds
         self.population_size = population_size
+        self.chromosome_length = chromosome_length
         self.max_generations = max_generations
         self.crossover_rate = crossover_rate
         self.mutation_rate = mutation_rate
         self.elitism_rate = elitism_rate
+        self.maximize = maximize
+        self.verbose = verbose
+        self.dimensions = len(bounds)
         
-        # Gerar cidades aleatórias com coordenadas entre 0 e 100
-        self.cities = 100 * np.random.rand(ncities, 2)
+        # Histórico para análise
+        self.best_fitness_history = []
+        self.avg_fitness_history = []
+        self.worst_fitness_history = []
+        self.execution_time = 0
         
-        # Calcular matriz de distâncias
-        self.distance_matrix = self._calculate_distance_matrix()
-        
-    def _calculate_distance_matrix(self) -> np.ndarray:
-        matrix = np.zeros((self.ncities, self.ncities))
-        for i in range(self.ncities):
-            for j in range(i+1, self.ncities):
-                dist = sqrt((self.cities[i,0] - self.cities[j,0])**2 + 
-                            (self.cities[i,1] - self.cities[j,1])**2)
-                matrix[i,j] = dist
-                matrix[j,i] = dist
-        return matrix
+    def initialize_population(self):
+        """Inicializa a população com cromossomos aleatórios."""
+        return np.random.rand(self.population_size, self.dimensions, self.chromosome_length)
     
-    def _initialize_population(self) -> List[List[int]]:
-        population = []
-        for _ in range(self.population_size):
-            individual = list(range(self.ncities))
-            np.random.shuffle(individual)
-            population.append(individual)
-        return population
+    def decode_chromosome(self, chromosome):
+        """Converte o cromossomo binário para valores reais dentro dos limites especificados."""
+        real_values = []
+        for i in range(self.dimensions):
+            # Converte para string binária
+            binary_str = ''.join(['1' if bit > 0.5 else '0' for bit in chromosome[i]])
+            # Converte para inteiro
+            integer = int(binary_str, 2)
+            # Escala para o intervalo [Xmin, Xmax]
+            scaled_value = self.bounds[i][0] + (integer / (2**self.chromosome_length - 1)) * (self.bounds[i][1] - self.bounds[i][0])
+            real_values.append(scaled_value)
+        return real_values
     
-    def _calculate_fitness(self, individual: List[int]) -> float:
-        total_distance = 0
-        for i in range(self.ncities - 1):
-            total_distance += self.distance_matrix[individual[i], individual[i+1]]
-        # Adiciona a distância de volta à cidade inicial
-        total_distance += self.distance_matrix[individual[-1], individual[0]]
-        return 1 / total_distance  # Queremos maximizar o fitness (inverso da distância)
+    def evaluate_fitness(self, population):
+        """Avalia a fitness da população inteira."""
+        fitness = []
+        for individual in population:
+            decoded = self.decode_chromosome(individual)
+            try:
+                fitness_value = self.objective_func(decoded)
+                # Inverte o sinal se for minimização
+                fitness.append(fitness_value if self.maximize else -fitness_value)
+            except:
+                # Trata valores inválidos com fitness muito ruim
+                fitness.append(-np.inf if self.maximize else np.inf)
+        return np.array(fitness)
     
-    def _select_parents(self, population: List[List[int]], fitness: List[float]) -> List[List[int]]:
-        parents = []
-        for _ in range(2):  # Seleciona 2 pais
-            tournament = random.sample(list(zip(population, fitness)), k=min(5, self.population_size))
-            tournament.sort(key=lambda x: x[1], reverse=True)
-            parents.append(tournament[0][0])
-        return parents
+    def selection(self, population, fitness):
+        """Seleção por torneio binário."""
+        selected_indices = []
+        for _ in range(int(self.population_size * (1 - self.elitism_rate))):
+            # Escolhe dois indivíduos aleatoriamente
+            contestants = np.random.choice(len(population), 2, replace=False)
+            # Seleciona o de melhor fitness
+            winner = contestants[np.argmax(fitness[contestants])]
+            selected_indices.append(winner)
+        return population[selected_indices]
     
-    def _crossover(self, parent1: List[int], parent2: List[int]) -> Tuple[List[int], List[int]]:
-        if random.random() > self.crossover_rate:
-            return parent1.copy(), parent2.copy()
-            
-        size = len(parent1)
-        child1, child2 = [-1]*size, [-1]*size
-        
-        # Escolhe dois pontos de corte
-        start, end = sorted(random.sample(range(size), 2))
-        
-        # Copia o segmento entre os pontos de corte
-        child1[start:end+1] = parent1[start:end+1]
-        child2[start:end+1] = parent2[start:end+1]
-        
-        # Preenche os genes restantes
-        self._fill_child(child1, parent2, end, start)
-        self._fill_child(child2, parent1, end, start)
-        return child1, child2
+    def crossover(self, parent1, parent2):
+        """Realiza crossover de um ponto entre dois pais."""
+        if np.random.rand() < self.crossover_rate:
+            # Seleciona um ponto de corte aleatório
+            crossover_point = np.random.randint(1, self.chromosome_length)
+            # Cria os filhos combinando os pais
+            child1 = np.concatenate((parent1[:, :crossover_point], parent2[:, crossover_point:]), axis=1)
+            child2 = np.concatenate((parent2[:, :crossover_point], parent1[:, crossover_point:]), axis=1)
+            return child1, child2
+        return parent1.copy(), parent2.copy()
     
-    def _fill_child(self, child: List[int], parent: List[int], end: int, start: int):
-        size = len(child)
-        current_pos = (end + 1) % size
-        parent_pos = (end + 1) % size
-        while -1 in child:
-            if parent[parent_pos] not in child:
-                child[current_pos] = parent[parent_pos]
-                current_pos = (current_pos + 1) % size
-            parent_pos = (parent_pos + 1) % size
+    def mutation(self, chromosome):
+        """Aplica mutação bit a bit."""
+        for i in range(self.dimensions):
+            for j in range(self.chromosome_length):
+                if np.random.rand() < self.mutation_rate:
+                    chromosome[i,j] = 1 - chromosome[i,j]
+        return chromosome
     
-    def _mutate(self, individual: List[int]) -> List[int]:
-        if random.random() > self.mutation_rate:
-            return individual.copy()
-            
-        start, end = sorted(random.sample(range(len(individual)), 2))
-        mutated = individual.copy()
-        mutated[start:end+1] = reversed(mutated[start:end+1])
-        return mutated
-    
-    def _apply_elitism(self, population: List[List[int]], fitness: List[float], 
-                      new_population: List[List[int]]) -> List[List[int]]:
-        elite_size = int(self.elitism_rate * self.population_size)
-        if elite_size == 0:
-            return new_population
-            
-        combined = list(zip(population, fitness))
-        combined.sort(key=lambda x: x[1], reverse=True)
-        elite = [x[0] for x in combined[:elite_size]]
-        
-        # Substitui os piores da nova população pelos elite
-        new_population.sort(key=lambda x: self._calculate_fitness(x))
-        new_population[-elite_size:] = elite
-        
-        return new_population
-    
-    def run(self) -> Tuple[List[int], float, dict]:
-        population = self._initialize_population()
-        best_individual = None
-        best_fitness = -float('inf')
-        
-        # Para plotar estatísticas
-        stats = {
-            'best': [],
-            'avg': [],
-            'worst': []
-        }
+    def run(self):
+        """Executa o algoritmo genético."""
+        start_time = time.time()
+        population = self.initialize_population()
         
         for generation in range(self.max_generations):
-            # Calcula fitness para toda a população
-            fitness = [self._calculate_fitness(ind) for ind in population]
+            # Avaliação da fitness
+            fitness = self.evaluate_fitness(population)
+            best_fitness = np.max(fitness)
+            avg_fitness = np.mean(fitness)
+            worst_fitness = np.min(fitness)
             
-            # Atualiza estatísticas
-            current_best = max(fitness)
-            current_avg = mean(fitness)
-            current_worst = min(fitness)
+            # Armazena histórico
+            self.best_fitness_history.append(best_fitness)
+            self.avg_fitness_history.append(avg_fitness)
+            self.worst_fitness_history.append(worst_fitness)
             
-            stats['best'].append(current_best)
-            stats['avg'].append(current_avg)
-            stats['worst'].append(current_worst)
+            if self.verbose and generation % 10 == 0:
+                print(f"Geração {generation}: Melhor = {best_fitness:.4f}, Médio = {avg_fitness:.4f}, Pior = {worst_fitness:.4f}")
             
-            # Atualiza o melhor indivíduo global
-            if current_best > best_fitness:
-                best_fitness = current_best
-                best_individual = population[fitness.index(current_best)]
+            # Critérios de parada
+            if generation > 10:
+                # 1. Melhoria mínima nas últimas 5 gerações
+                if np.std(self.best_fitness_history[-5:]) < 1e-4:
+                    if self.verbose:
+                        print(f"Parada por convergência (pouca melhoria) na geração {generation}")
+                    break
+                
+                # 2. Fitness atingiu valor alvo (se conhecido)
+                if abs(best_fitness) < 1e-3:  # Para problemas de minimização com ótimo em zero
+                    if self.verbose:
+                        print(f"Parada por atingir valor alvo na geração {generation}")
+                    break
             
-            # Cria nova população
+            # Seleção
+            selected = self.selection(population, fitness)
+            
+            # Crossover
             new_population = []
+            for i in range(0, len(selected), 2):
+                if i+1 < len(selected):
+                    child1, child2 = self.crossover(selected[i], selected[i+1])
+                    new_population.extend([child1, child2])
+                else:
+                    new_population.append(selected[i])
             
-            # Aplica elitismo
-            elite_size = int(self.elitism_rate * self.population_size)
-            elite = []
-            if elite_size > 0:
-                elite_fitness = sorted(zip(population, fitness), key=lambda x: x[1], reverse=True)[:elite_size]
-                elite = [x[0] for x in elite_fitness]
+            # Mutação
+            for i in range(len(new_population)):
+                new_population[i] = self.mutation(new_population[i])
             
-            while len(new_population) < self.population_size - elite_size:
-                # Seleciona pais
-                parents = self._select_parents(population, fitness)
-                
-                # Aplica cruzamento
-                child1, child2 = self._crossover(parents[0], parents[1])
-                
-                # Aplica mutação
-                child1 = self._mutate(child1)
-                child2 = self._mutate(child2)
-                
-                new_population.extend([child1, child2])
+            # Elitismo (mantém os melhores indivíduos)
+            elite_size = int(self.population_size * self.elitism_rate)
+            elite_indices = np.argsort(fitness)[-elite_size:]
+            elite = population[elite_indices]
             
-            # Adiciona elite à nova população
-            new_population.extend(elite)
-            new_population = new_population[:self.population_size]
-            
-            population = new_population
-            
-            # Printa progresso a cada 50 gerações
-            if generation % 50 == 0:
-                print(f"Geração {generation}: Melhor fitness = {current_best:.6f}, Média = {current_avg:.6f}")
+            # Nova população combina elite e novos indivíduos
+            population = np.concatenate((elite, np.array(new_population)[:self.population_size-elite_size]))
         
-        return best_individual, 1/best_fitness, stats
+        # Retorna o melhor indivíduo encontrado
+        fitness = self.evaluate_fitness(population)
+        best_idx = np.argmax(fitness)
+        best_individual = population[best_idx]
+        best_solution = self.decode_chromosome(best_individual)
+        best_fitness = self.objective_func(best_solution)
+        
+        self.execution_time = time.time() - start_time
+        
+        if self.verbose:
+            print("\n--- Resultados Finais ---")
+            print(f"Melhor solução encontrada: {best_solution}")
+            print(f"Valor da função objetivo: {best_fitness}")
+            print(f"Tempo de execução: {self.execution_time:.2f} segundos")
+            print(f"Total de gerações: {len(self.best_fitness_history)}")
+        
+        return best_solution, best_fitness
+
+# Funções objetivo pré-definidas
+def peaks_function(x):
+    """Função Peaks para maximização. Domínio recomendado: x,y ∈ [-3, 3]"""
+    x, y = x[0], x[1]
+    return 3*(1-x)**2 * np.exp(-x**2 - (y+1)**2) - 10*(x/5 - x**3 - y**5) * np.exp(-x**2 - y**2) - 1/3 * np.exp(-(x+1)**2 - y**2)
+
+def ackley_function(x):
+    """Função Ackley para minimização. Domínio recomendado: x,y ∈ [-35, 35]"""
+    x, y = x[0], x[1]
+    return -20 * np.exp(-0.2 * np.sqrt(0.5 * (x**2 + y**2))) - np.exp(0.5 * (np.cos(2*np.pi*x) + np.cos(2*np.pi*y))) + np.e + 20
+
+def rastrigin_function(x):
+    """Função Rastrigin para minimização. Domínio recomendado: x,y ∈ [-5.12, 5.12]"""
+    x, y = x[0], x[1]
+    A = 10
+    return A*2 + (x**2 - A*np.cos(2*np.pi*x)) + (y**2 - A*np.cos(2*np.pi*y))
+
+def sphere_function(x):
+    """Função Sphere (esfera) para minimização. Domínio recomendado: x,y ∈ [-5, 5]"""
+    return sum(xi**2 for xi in x)
+
+# Interface do usuário
+def run_optimization():
+    """Função principal que gerencia a interação com o usuário."""
+    print("=== Ferramenta de Otimização por Algoritmo Genético ===")
+    print("\nSelecione a função objetivo:")
+    print("1 - Função Peaks (maximização)")
+    print("2 - Função Ackley (minimização)")
+    print("3 - Função Rastrigin (minimização)")
+    print("4 - Função Sphere (minimização)")
+    print("5 - Definir função personalizada")
     
-    def plot_stats(self, stats: dict):
-        plt.figure(figsize=(10, 6))
-        plt.plot(stats['best'], label='Melhor fitness')
-        plt.plot(stats['avg'], label='Fitness médio')
-        plt.plot(stats['worst'], label='Pior fitness')
-        plt.xlabel('Geração')
-        plt.ylabel('Fitness (1/distância)')
-        plt.title('Evolução do Fitness ao Longo das Gerações')
+    try:
+        choice = int(input("Opção (1-5): "))
+    except:
+        print("Opção inválida. Usando Função Rastrigin como padrão.")
+        choice = 3
+    
+    if choice == 1:
+        func = peaks_function
+        bounds = [(-3, 3), (-3, 3)]
+        maximize = True
+        print("\nFunção Peaks selecionada (maximização no intervalo [-3, 3])")
+    elif choice == 2:
+        func = ackley_function
+        bounds = [(-35, 35), (-35, 35)]
+        maximize = False
+        print("\nFunção Ackley selecionada (minimização no intervalo [-35, 35])")
+    elif choice == 3:
+        func = rastrigin_function
+        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
+        maximize = False
+        print("\nFunção Rastrigin selecionada (minimização no intervalo [-5.12, 5.12])")
+    elif choice == 4:
+        func = sphere_function
+        bounds = [(-5, 5), (-5, 5)]
+        maximize = False
+        print("\nFunção Sphere selecionada (minimização no intervalo [-5, 5])")
+    elif choice == 5:
+        print("\nDefina sua função personalizada.")
+        print("Exemplo: Para f(x,y) = x^2 + y^2, digite: x[0]**2 + x[1]**2")
+        func_str = input("Digite a expressão da função (use x[0], x[1], etc. para as variáveis): ")
+        
+        try:
+            # Cria uma função lambda a partir da string fornecida
+            func = lambda x: eval(func_str)
+            # Testa a função
+            test_input = [0]*2
+            func(test_input)
+            
+            print("\nDefina os limites para cada variável:")
+            bounds = []
+            for i in range(2):  # Assumindo 2 dimensões por padrão
+                xmin = float(input(f"Limite inferior para x[{i}]: "))
+                xmax = float(input(f"Limite superior para x[{i}]: "))
+                bounds.append((xmin, xmax))
+            
+            maximize_input = input("Maximizar a função? (s/n): ").lower()
+            maximize = maximize_input == 's'
+            
+            print("\nFunção personalizada configurada com sucesso!")
+        except:
+            print("\nErro na definição da função. Usando Função Rastrigin como padrão.")
+            func = rastrigin_function
+            bounds = [(-5.12, 5.12), (-5.12, 5.12)]
+            maximize = False
+    else:
+        print("Opção inválida. Usando Função Rastrigin como padrão.")
+        func = rastrigin_function
+        bounds = [(-5.12, 5.12), (-5.12, 5.12)]
+        maximize = False
+    
+    print("\nConfiguração dos parâmetros do Algoritmo Genético:")
+    print("(Pressione Enter para usar os valores padrão)")
+    
+    try:
+        pop_size = int(input(f"Tamanho da população (10-100) [50]: ") or 50)
+        chrom_len = int(input(f"Tamanho do cromossomo (10-35) [20]: ") or 20)
+        max_gen = int(input(f"Número máximo de gerações (10-50) [30]: ") or 30)
+        crossover = float(input(f"Taxa de cruzamento (0.6-0.8) [0.7]: ") or 0.7)
+        mutation = float(input(f"Taxa de mutação (0.01-0.05) [0.02]: ") or 0.02)
+        elitism = float(input(f"Taxa de elitismo (0.55-0.75) [0.6]: ") or 0.6)
+    except:
+        print("Valores inválidos. Usando configurações padrão.")
+        pop_size = 50
+        chrom_len = 20
+        max_gen = 30
+        crossover = 0.7
+        mutation = 0.02
+        elitism = 0.6
+    
+    # Cria e executa o algoritmo genético
+    ga = GeneticAlgorithm(func, bounds, pop_size, chrom_len, max_gen, 
+                         crossover, mutation, elitism, maximize)
+    
+    solution, fitness = ga.run()
+    
+    # Plotagem dos resultados
+    plt.figure(figsize=(15, 5))
+    
+    # Gráfico de convergência
+    plt.subplot(1, 2, 1)
+    plt.plot(ga.best_fitness_history, 'b-', label='Melhor fitness')
+    plt.plot(ga.avg_fitness_history, 'g-', label='Fitness médio')
+    plt.plot(ga.worst_fitness_history, 'r-', label='Pior fitness')
+    plt.xlabel('Geração')
+    plt.ylabel('Fitness')
+    plt.title('Convergência do Algoritmo Genético')
+    plt.legend()
+    plt.grid(True)
+    
+    # Plotagem da função objetivo (para 2D)
+    if len(bounds) == 2:
+        plt.subplot(1, 2, 2)
+        x = np.linspace(bounds[0][0], bounds[0][1], 100)
+        y = np.linspace(bounds[1][0], bounds[1][1], 100)
+        X, Y = np.meshgrid(x, y)
+        Z = np.zeros_like(X)
+        
+        for i in range(X.shape[0]):
+            for j in range(X.shape[1]):
+                Z[i,j] = func([X[i,j], Y[i,j]])
+        
+        plt.contourf(X, Y, Z, levels=20, cmap='viridis')
+        plt.colorbar()
+        plt.scatter(solution[0], solution[1], c='red', marker='x', s=100, linewidths=2, label='Solução')
+        plt.title('Função Objetivo e Solução Encontrada')
         plt.legend()
-        plt.grid()
-        plt.show()
+        plt.grid(True)
     
-    def plot_solution(self, solution: List[int]):
-        plt.figure(figsize=(8, 8))
-        # Plota as cidades
-        plt.scatter(self.cities[:, 0], self.cities[:, 1], c='red', s=50)
-        
-        # Plota o caminho
-        tour = self.cities[solution + [solution[0]]]
-        plt.plot(tour[:, 0], tour[:, 1], 'b-')
-        
-        # Adiciona números às cidades
-        for i, (x, y) in enumerate(self.cities):
-            plt.text(x, y, str(i), fontsize=12)
-        
-        plt.title(f'Melhor Rota Encontrada - Distância: {1/self._calculate_fitness(solution):.2f}')
-        plt.xlabel('Coordenada X')
-        plt.ylabel('Coordenada Y')
-        plt.grid()
-        plt.show()
+    plt.tight_layout()
+    plt.show()
 
-# Parâmetros do algoritmo
-ncities = 50
-population_size = 100
-max_generations = 500
-crossover_rate = 0.8
-mutation_rate = 0.2
-elitism_rate = 0.1
-
-# Item a) Implementação do algoritmo genético
-print("Implementação do Algoritmo Genético para o Problema do Caixeiro Viajante")
-print(f"Número de cidades: {ncities}")
-print(f"Tamanho da população: {population_size}")
-print(f"Número máximo de gerações: {max_generations}")
-print(f"Taxa de cruzamento: {crossover_rate}")
-print(f"Taxa de mutação: {mutation_rate}")
-print(f"Taxa de elitismo: {elitism_rate}")
-
-# Item b) Executar 10 vezes e calcular estatísticas
-print("\nExecutando 10 vezes o algoritmo...")
-results = []
-best_solutions = []
-
-for run in range(10):
-    print(f"\nExecução {run+1}:")
-    ga = TSPGeneticAlgorithm(ncities, population_size, max_generations, 
-                            crossover_rate, mutation_rate, elitism_rate)
-    best_ind, best_dist, stats = ga.run()
-    best_solutions.append((best_ind, best_dist))
-    results.append(best_dist)
-    print(f"Melhor distância encontrada: {best_dist:.2f}")
+# Função para estudo paramétrico
+def parameter_study():
+    """Realiza um estudo sistemático dos parâmetros do AG."""
+    print("\n=== Estudo Paramétrico do Algoritmo Genético ===")
+    print("Este estudo usará a função Rastrigin como caso de teste.")
+    print("Cada parâmetro será variado enquanto os outros permanecem fixos.\n")
     
-    # Na primeira execução, plotar as estatísticas e a solução
-    if run == 0:
-        ga.plot_stats(stats)
-        ga.plot_solution(best_ind)
+    # Configuração base
+    base_params = {
+        'population_size': 50,
+        'chromosome_length': 20,
+        'max_generations': 30,
+        'crossover_rate': 0.7,
+        'mutation_rate': 0.02,
+        'elitism_rate': 0.6
+    }
+    
+    # Variação de cada parâmetro
+    param_ranges = {
+        'population_size': range(10, 101, 10),
+        'chromosome_length': range(10, 36, 5),
+        'max_generations': range(10, 51, 10),
+        'crossover_rate': np.linspace(0.6, 0.8, 5),
+        'mutation_rate': np.linspace(0.01, 0.05, 5),
+        'elitism_rate': np.linspace(0.55, 0.75, 5)
+    }
+    
+    results = {}
+    
+    for param_name, param_range in param_ranges.items():
+        print(f"\nEstudando variação do parâmetro: {param_name}")
+        param_results = []
+        
+        for value in param_range:
+            # Cria cópia dos parâmetros base e atualiza o parâmetro atual
+            params = base_params.copy()
+            params[param_name] = value
+            
+            # Executa o GA com configuração atual
+            ga = GeneticAlgorithm(rastrigin_function, [(-5.12, 5.12), (-5.12, 5.12)], 
+                                 **params, maximize=False, verbose=False)
+            solution, fitness = ga.run()
+            
+            # Armazena o melhor fitness encontrado e o tempo de execução
+            best_fitness = min(ga.best_fitness_history)
+            param_results.append({
+                'value': value,
+                'best_fitness': best_fitness,
+                'execution_time': ga.execution_time,
+                'generations': len(ga.best_fitness_history)
+            })
+            
+            print(f"{param_name}={value:.3f} -> Fitness: {best_fitness:.4f}, Tempo: {ga.execution_time:.2f}s, Gerações: {len(ga.best_fitness_history)}")
+        
+        results[param_name] = param_results
+    
+    # Plotagem dos resultados
+    plt.figure(figsize=(15, 10))
+    for i, (param_name, param_results) in enumerate(results.items()):
+        plt.subplot(2, 3, i+1)
+        x = [r['value'] for r in param_results]
+        y = [r['best_fitness'] for r in param_results]
+        plt.plot(x, y, 'o-')
+        plt.xlabel(param_name)
+        plt.ylabel('Melhor Fitness')
+        plt.title(f"Variação de {param_name}")
+        plt.grid(True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Exibe tabela resumo
+    print("\n=== Resumo do Estudo Paramétrico ===")
+    print("Parâmetro\tMelhor Valor\tMelhor Fitness")
+    for param_name, param_results in results.items():
+        best_result = min(param_results, key=lambda x: x['best_fitness'])
+        print(f"{param_name}\t{best_result['value']:.3f}\t\t{best_result['best_fitness']:.4f}")
 
-# Calcula estatísticas
-mean_dist = mean(results)
-std_dist = stdev(results) if len(results) > 1 else 0
+# Menu principal
+def main():
+    while True:
+        print("\n=== MENU PRINCIPAL ===")
+        print("1 - Executar otimização")
+        print("2 - Realizar estudo paramétrico")
+        print("3 - Sair")
+        
+        try:
+            option = int(input("Opção: "))
+        except:
+            option = 0
+        
+        if option == 1:
+            run_optimization()
+        elif option == 2:
+            parameter_study()
+        elif option == 3:
+            print("Encerrando o programa...")
+            break
+        else:
+            print("Opção inválida. Tente novamente.")
 
-print("\nResultados das 10 execuções:")
-for i, (ind, dist) in enumerate(best_solutions):
-    print(f"Execução {i+1}: Distância = {dist:.2f}")
-
-print(f"\nMédia das distâncias: {mean_dist:.2f}")
-print(f"Desvio padrão das distâncias: {std_dist:.2f}")
+if __name__ == "__main__":
+    main()
